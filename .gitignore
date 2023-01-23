@@ -5,3 +5,4 @@ flickr.db
 flickr_auth
 flickr_keys.toml
 flickr_tools.egg-info
+flickr-photos
