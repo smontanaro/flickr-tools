@@ -1,1 +1,7 @@
 *~
+dist
+.DS_Store
+flickr.db
+flickr_auth
+flickr_keys.toml
+flickr_tools.egg-info
