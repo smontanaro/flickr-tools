@@ -18,20 +18,25 @@ import flickr_api as flickr
 import regex as re
 import requests
 
-def call_flickr_method(method, *args, **kwds):
+def call_flickr(method, *args, **kwds):
     try:
         return (method(*args, **kwds), None)
     except flickr.FlickrError as exc:
         errmsg = re.sub("<html[^>]*>.*</html>",
             "<html> ... (elided) ...</html>",
             str(exc), flags=re.DOTALL)
-        traceback.print_tb()
+        traceback.print_exc()
         print("Pause 15s")
         time.sleep(15)
         return (None, errmsg)
     except requests.Timeout:
-        traceback.print_tb()
+        traceback.print_exc()
         return (None, "timeout")
+    except OSError as exc:
+        traceback.print_exc()
+        print("Pause 15s")
+        time.sleep(15)
+        return (None, str(exc))
 
 def populate_photos_db(photos, album, db):
     cur = db.cursor()
@@ -70,17 +75,17 @@ def load_photos(container, db, maxphotos=0):
     while True:
         page_size = 500 if maxphotos == 0 else min(500, maxphotos)
 
-        (new_photos, failure) = call_flickr_method(container.getPhotos,
-                                                   per_page=page_size, page=page)
+        (new_photos, failure) = call_flickr(container.getPhotos,
+                                            per_page=page_size, page=page)
         if failure == "timeout":
             timeouts += 1
             if timeouts >= 10:
                 print("Too many timeouts")
                 break
             continue
-        elif failure is not None:
+        if failure is not None:
             nerrs += 1
-            print(f"Error: {failure}")
+            print(f"Error {container}: {failure}")
             if nerrs >= 10:
                 print("Too many errors, giving up")
                 break
@@ -119,7 +124,7 @@ def classify_photos(photos):
             time.sleep(pause)
         if n % 100 == 0:
             print("... photos:", n, "orphans:", len(orphans))
-        (album_context, failure) = call_flickr_method(photo.getAllContexts)
+        (album_context, failure) = call_flickr(photo.getAllContexts)
         if failure is None:
             album_context = album_context[0]
         elif failure == "timeout":
@@ -168,7 +173,7 @@ def save_photos(photos, user, outputdir="."):
         if n % 100 == 0:
             print("... photos:", n)
         filename = outputdir.joinpath(f"{user.id}.{photo.id}.jpg")
-        (_, failure) = call_flickr_method(photo.save, filename, size_label="Original")
+        (_, failure) = call_flickr(photo.save, filename, size_label="Original")
         if failure:
             print(f"error saving {filename} ({failure})")
             print("Pause 15s")
@@ -190,7 +195,7 @@ def delete_photos(photos):
             time.sleep(pause)
         if n % 100 == 0:
             print("... photos:", n)
-        (_, failure) = call_flickr_method(photo.delete)
+        (_, failure) = call_flickr(photo.delete)
         if failure is not None:
             print(f"error deleting photo {photo.id} ({failure})")
             print("Pause 15s")
