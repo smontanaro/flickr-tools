@@ -5,38 +5,50 @@ Download orphaned photos from Flickr.
 """
 
 import argparse
+import datetime
 from pathlib import Path
 import random
 import sqlite3
 import sys
 import time
 import tomllib
-import traceback
 
 import dateutil.parser
 import flickr_api as flickr
 import regex as re
 import requests
 
+# pylint: disable=global-statement
+VERBOSE = False
+
+class FlickrCallFailed (flickr.FlickrError):
+    "whenever we catch some kind of error calling Flickr API..."
+
+
+def eprint(*args, file=sys.stderr, **kwds):
+    "error print"
+    now = datetime.datetime.now().strftime("%T")
+    return print(now, *args, file=file, **kwds) if VERBOSE else None
+
+
 def call_flickr(method, *args, **kwds):
+    name = method.__qualname__ if hasattr(method, "__qualname__") else method.__name__
+    eprint(f"calling: {name}(*{args}, **{kwds})")
     try:
-        return (method(*args, **kwds), None)
+        return method(*args, **kwds)
     except flickr.FlickrError as exc:
         errmsg = re.sub("<html[^>]*>.*</html>",
             "<html> ... (elided) ...</html>",
             str(exc), flags=re.DOTALL)
-        traceback.print_exc()
-        print("Pause 15s")
+        eprint("Pause 15s")
         time.sleep(15)
-        return (None, errmsg)
+        raise FlickrCallFailed(errmsg) from exc
     except requests.Timeout:
-        traceback.print_exc()
-        return (None, "timeout")
+        raise FlickrCallFailed("timeout") from exc
     except OSError as exc:
-        traceback.print_exc()
-        print("Pause 15s")
+        eprint("Pause 15s")
         time.sleep(15)
-        return (None, str(exc))
+        raise FlickrCallFailed(str(exc)) from exc
 
 def populate_photos_db(photos, album, db):
     cur = db.cursor()
@@ -71,43 +83,43 @@ def load_photos(container, db, maxphotos=0):
     photos = set()
     ids = set()
     page = 1
-    n = nerrs = timeouts = 0
+    nerrs = timeouts = 0
     while True:
         page_size = 500 if maxphotos == 0 else min(500, maxphotos)
 
-        (new_photos, failure) = call_flickr(container.getPhotos,
-                                            per_page=page_size, page=page)
-        if failure == "timeout":
-            timeouts += 1
-            if timeouts >= 10:
-                print("Too many timeouts")
-                break
-            continue
-        if failure is not None:
+        eprint(f"Download up to {page_size} photos from {container}")
+        try:
+            new_photos = call_flickr(container.getPhotos,
+                per_page=page_size, page=page)
+        except FlickrCallFailed as exc:
+            if str(exc) == "timeout":
+                timeouts += 1
+                if timeouts >= 10:
+                    eprint("Too many timeouts")
+                    break
+                continue
             nerrs += 1
-            print(f"Error {container}: {failure}")
+            eprint(f"Error {container}: {exc}")
             if nerrs >= 10:
-                print("Too many errors, giving up")
+                eprint("Too many errors, giving up")
                 break
             continue
 
+        eprint(f"found {len(new_photos)} images, page size {page_size}")
         populate_photos_db(new_photos, container, db)
 
         photos |= set(new_photos)
         ids |= set(photo.id for photo in new_photos)
-        if len(ids) == n:
-            break
-        n = len(ids)
-        print("n:", n, "page:", page)
-        if maxphotos and n >= maxphotos:
+
+        if len(new_photos) < page_size:
             break
         page += 1
         # pause to avoid clampdown by Flickr?
         pause = random.random() * 15
-        print(f"pause {pause:.2f}s")
+        eprint(f"pause {pause:.2f}s")
         time.sleep(pause)
 
-    print(n, "photos")
+    eprint(len(photos), "photos")
     return photos
 
 def classify_photos(photos):
@@ -118,25 +130,24 @@ def classify_photos(photos):
     for photo in photos:
         n += 1
         if n % 25 == 0:
+            eprint("... photos:", len(rest),
+                   "orphans:", len(orphans),
+                   "errors:", len(errors))
             # pause to avoid clampdown by Flickr?
             pause = random.random() * 15
-            print(f"pause {pause:.2f}s")
+            eprint(f"pause {pause:.2f}s {n}")
             time.sleep(pause)
-        if n % 100 == 0:
-            print("... photos:", n, "orphans:", len(orphans))
-        (album_context, failure) = call_flickr(photo.getAllContexts)
-        if failure is None:
+        try:
+            album_context = call_flickr(photo.getAllContexts)
             album_context = album_context[0]
-        elif failure == "timeout":
-            timeouts += 1
-            if timeouts >= 10:
-                print("Too many timeouts")
-                break
-            continue
-        else:
-            print("error getting contexts for", photo, failure)
-            print("Pausing 15s")
-            time.sleep(15)
+        except FlickrCallFailed as exc:
+            if str(exc) == "timeout":
+                timeouts += 1
+                if timeouts >= 10:
+                    eprint("Too many timeouts")
+                    break
+                continue
+            eprint("error getting contexts for", photo, exc)
             errors.add(photo)
             continue
 
@@ -151,6 +162,9 @@ def classify_photos(photos):
                 continue
 
         rest.add(photo)
+    eprint("photos:", len(rest),
+           "orphans:", len(orphans),
+           "errors:", len(errors))
 
     return orphans, errors, rest
 
@@ -158,7 +172,7 @@ def classify_photos(photos):
 def save_photos(photos, user, outputdir="."):
     if not photos:
         return
-    print(f"saving {len(photos)} photos to {outputdir}")
+    eprint(f"saving {len(photos)} photos to {outputdir}")
     outputdir = Path(outputdir)
     outputdir.mkdir(parents=True, exist_ok=True)
 
@@ -168,21 +182,25 @@ def save_photos(photos, user, outputdir="."):
         if n % 25 == 0:
             # pause to avoid clampdown by Flickr?
             pause = random.random() * 15
-            print(f"pause {pause:.2f}s")
+            eprint(f"pause {pause:.2f}s {n}")
             time.sleep(pause)
         if n % 100 == 0:
-            print("... photos:", n)
+            eprint("... photos:", n)
         filename = outputdir.joinpath(f"{user.id}.{photo.id}.jpg")
-        (_, failure) = call_flickr(photo.save, filename, size_label="Original")
-        if failure:
-            print(f"error saving {filename} ({failure})")
-            print("Pause 15s")
+        try:
+            call_flickr(photo.save, filename, size_label="Original")
+        except FlickrCallFailed as exc:
+            eprint(f"error saving {filename} ({exc})")
+            eprint("Pause 15s")
             time.sleep(15)
 
 def delete_photos(photos):
+    if not photos:
+        return
+
     yn = input(f"Delete {len(photos)} photos (y/n)? ")
     if not yn or yn.lower()[0] != "y":
-        print("Delete not confirmed.")
+        eprint("Delete not confirmed.")
         return
 
     n = 0
@@ -191,14 +209,15 @@ def delete_photos(photos):
         if n % 25 == 0:
             # pause to avoid clampdown by Flickr?
             pause = random.random() * 15
-            print(f"pause {pause:.2f}s")
+            eprint(f"pause {pause:.2f}s {n}")
             time.sleep(pause)
         if n % 100 == 0:
-            print("... photos:", n)
-        (_, failure) = call_flickr(photo.delete)
-        if failure is not None:
-            print(f"error deleting photo {photo.id} ({failure})")
-            print("Pause 15s")
+            eprint("... photos:", n)
+        try:
+            call_flickr(photo.delete)
+        except FlickrCallFailed as exc:
+            eprint(f"error deleting photo {photo.id} ({exc})")
+            eprint("Pause 15s")
             time.sleep(15)
 
 
@@ -208,7 +227,7 @@ def flickr_login(username):
     flickr.set_keys(api_key=keys["API_KEY"], api_secret=keys["API_SECRET"])
     flickr.set_auth_handler("./flickr_auth")
     flickr.enable_cache()
-    return flickr.Person.findByUserName(username)
+    return call_flickr(flickr.Person.findByUserName, username)
 
 
 def get_album(album_name, user, db):
@@ -230,27 +249,33 @@ def get_album(album_name, user, db):
                 "    VALUES"
                 "  (?, ?, ?, ?)",
                 (album.id, album.title, album.date_create, url))
+            eprint(f"Inserted {album} in db")
     db.commit()
 
-    return [album for album in albums if album.title == album_name][0]
+    try:
+        return [album for album in albums if album.title == album_name][0]
+    except IndexError:
+        eprint(f"Can't find an album named {album_name}")
+        raise
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("-v", "--verbose", dest="verbose", action="store_true")
     parser.add_argument("-s", "--save", dest="save",
                         help="save orphaned photos to this dir")
-    parser.add_argument("--save-all", dest="saveall", default=False,
+    parser.add_argument("--delete-all", dest="deleteall", default=False,
                         action="store_true",
-                        help="if true save all photos, not just orphans")
+                        help="if true delete all photos, not just orphans")
     parser.add_argument("--delete", dest="delete", action="store_true",
                         help="delete orphaned photos", default=False)
-    parser.add_argument("-m", "--maxphotos", dest="maxphotos",
-                        type=int,
+    parser.add_argument("-m", "--maxphotos", dest="maxphotos", type=int,
                         help="max # of photos to download", default=0)
-    parser.add_argument("-u", "--user", dest="user", required=True,
-                        help="Flickr username")
+    parser.add_argument("-u", "--user", dest="user", required=True, help="Flickr username")
     parser.add_argument("-d", "--database", help="SQLite3 database filename",
                         default=":memory:")
+    parser.add_argument("-a", "--album", help="Album to download",
+                        default="Auto Upload")
     return parser.parse_args()
 
 def get_db_connection(sqldb):
@@ -287,31 +312,35 @@ def get_db_connection(sqldb):
 
 
 def main():
+    global VERBOSE
+
     args = parse_args()
+
+    VERBOSE = args.verbose
+
     user = flickr_login(args.user)
 
     db = get_db_connection(args.database)
 
-    # We're currently only interested in identifying photos which have been
-    # uploaded but not added to other albums. Album name should be a command
-    # line arg.
-    auto_upload = get_album("Auto Upload", user, db)
-    photos = load_photos(auto_upload, maxphotos=args.maxphotos,
-        db=db)
+    album = get_album(args.album, user, db)
+    photos = load_photos(album, maxphotos=args.maxphotos, db=db)
 
     orphans, errors, rest = classify_photos(photos)
-    print(f"{len(orphans)} orphans")
-    print(f"{len(errors)} uncategorized due to errors")
-    print(f"{len(rest)} everything else")
+    eprint(f"{len(orphans)} orphans")
+    eprint(f"{len(errors)} uncategorized due to errors")
+    eprint(f"{len(rest)} everything else")
 
     if args.save is not None:
+        eprint("saving photos to", args.save)
         save_photos(orphans, user, args.save)
         save_photos(errors, user, args.save)
-        if args.saveall:
-            save_photos(rest, user, args.save)
+        save_photos(rest, user, args.save)
 
     if args.delete:
         delete_photos(orphans)
+        if args.deleteall:
+            delete_photos(errors)
+            delete_photos(rest)
 
     return 0
 
