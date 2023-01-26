@@ -32,6 +32,12 @@ def eprint(*args, file=sys.stderr, **kwds):
 
 
 def call_flickr(method, *args, **kwds):
+    """Make a call via the Flickr API.
+
+    TBD: Every N calls, call a pause. That should isolate the pause code
+        to a single place.
+    """
+
     name = method.__qualname__ if hasattr(method, "__qualname__") else method.__name__
     eprint(f"calling: {name}(*{args}, **{kwds})")
     try:
@@ -43,7 +49,7 @@ def call_flickr(method, *args, **kwds):
         eprint("Pause 15s")
         time.sleep(15)
         raise FlickrCallFailed(errmsg) from exc
-    except requests.Timeout:
+    except requests.Timeout as exc:
         raise FlickrCallFailed("timeout") from exc
     except OSError as exc:
         eprint("Pause 15s")
@@ -60,7 +66,11 @@ def populate_photos_db(photos, album, db):
             "  where id = ?", (photo.id,)).fetchone()[0]
         if n == 0:
             url = photo.getPageUrl().replace("http://", "https://")
-            info = photo.getInfo()
+            try:
+                info = call_flickr(photo.getInfo)
+            except FlickrCallFailed as exc:
+                eprint("error retrieving info for", photo)
+                continue
             created = int(dateutil.parser.parse(info["taken"]).strftime("%s"))
             cur.execute(
                 "insert into photos"
@@ -84,10 +94,9 @@ def load_photos(container, db, maxphotos=0):
     ids = set()
     page = 1
     nerrs = timeouts = 0
+    page_size = 250 if maxphotos == 0 else min(250, maxphotos)
+    eprint(f"Download up to {page_size} photos from {container}")
     while True:
-        page_size = 500 if maxphotos == 0 else min(500, maxphotos)
-
-        eprint(f"Download up to {page_size} photos from {container}")
         try:
             new_photos = call_flickr(container.getPhotos,
                 per_page=page_size, page=page)
@@ -274,8 +283,8 @@ def parse_args():
     parser.add_argument("-u", "--user", dest="user", required=True, help="Flickr username")
     parser.add_argument("-d", "--database", help="SQLite3 database filename",
                         default=":memory:")
-    parser.add_argument("-a", "--album", help="Album to download",
-                        default="Auto Upload")
+    parser.add_argument("-a", "--album", dest="album_name", help="Album to download",
+                        default=None)
     return parser.parse_args()
 
 def get_db_connection(sqldb):
@@ -322,8 +331,12 @@ def main():
 
     db = get_db_connection(args.database)
 
-    album = get_album(args.album, user, db)
-    photos = load_photos(album, maxphotos=args.maxphotos, db=db)
+    if args.album_name is not None:
+        container = get_album(args.album_name, user, db)
+    else:
+        # Operate on the photostream (I think)
+        container = user
+    photos = load_photos(container, maxphotos=args.maxphotos, db=db)
 
     orphans, errors, rest = classify_photos(photos)
     eprint(f"{len(orphans)} orphans")
