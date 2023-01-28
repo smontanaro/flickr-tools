@@ -21,6 +21,9 @@ import requests
 # pylint: disable=global-statement
 VERBOSE = False
 
+sqlite3.register_adapter(bool, int)
+sqlite3.register_converter("BOOLEAN", lambda v: bool(int(v)))
+
 class FlickrCallFailed (flickr.FlickrError):
     "whenever we catch some kind of error calling Flickr API..."
 
@@ -30,6 +33,16 @@ def eprint(*args, file=sys.stderr, **kwds):
     now = datetime.datetime.now().strftime("%T")
     return print(now, *args, file=file, **kwds) if VERBOSE else None
 
+
+def func_name(func):
+    "I would have thought inspect could do this"
+    if hasattr(func, "__qualname__"):
+        return func.__qualname__
+    if hasattr(func, "__name__"):
+        return func.__name__
+    if hasattr(func, "__func__"):
+        return func_name(func.__func__)
+    return "<unknown>"
 
 class FlickrAPI:
     "Call flickr method, doing a bit of housekeeping along the way"
@@ -49,11 +62,11 @@ class FlickrAPI:
         self.n_calls += 1
         if self.n_calls % 50 == 0:
             # pause to avoid clampdown by Flickr?
-            pause = random.random() * 15
+            pause = random.random() * 15   # nosec
             eprint(f"pause {pause:.2f}s (calls: {self.n_calls})")
             time.sleep(pause)
 
-        name = method.__qualname__ if hasattr(method, "__qualname__") else method.__name__
+        name = func_name(method)
         eprint(f"calling: {name}(*{args}, **{kwds})")
         try:
             result = method(*args, **kwds)
@@ -64,7 +77,7 @@ class FlickrAPI:
                 "<html> ... (elided) ...</html>",
                 str(exc), flags=re.DOTALL)
             self.n_errors += 1
-            eprint("Pause 15s")
+            eprint(f"{name} error, pause 15s")
             time.sleep(15)
             raise FlickrCallFailed(errmsg) from exc
         except requests.Timeout as exc:
@@ -72,7 +85,7 @@ class FlickrAPI:
             raise FlickrCallFailed("timeout") from exc
         except OSError as exc:
             self.n_errors += 1
-            eprint("Pause 15s")
+            eprint(f"{name} error, pause 15s")
             time.sleep(15)
             raise FlickrCallFailed(str(exc)) from exc
 
@@ -83,29 +96,39 @@ def populate_photos_db(photos, album, db):
     cur.execute("begin")
 
     for photo in photos:
+        url = FLICKR_API.call_flickr(photo.getPageUrl).replace("http://", "https://")
+        try:
+            info = FLICKR_API.call_flickr(photo.getInfo)
+        except FlickrCallFailed:
+            eprint("error retrieving info for", photo)
+            continue
         n = cur.execute(
             "select count(*) from photos"
             "  where id = ?", (photo.id,)).fetchone()[0]
         if n == 0:
-            url = photo.getPageUrl().replace("http://", "https://")
-            try:
-                info = FLICKR_API.call_flickr(photo.getInfo)
-            except FlickrCallFailed:
-                eprint("error retrieving info for", photo)
-                continue
             created = int(dateutil.parser.parse(info["taken"]).strftime("%s"))
             cur.execute(
                 "insert into photos"
-                "  (id, title, created, url)"
+                "  (id, title, description, created, url)"
                 "    VALUES"
-                "  (?, ?, ?, ?)",
-                (photo.id, photo.title, created, url))
+                "  (?, ?, ?, ?, ?)",
+                (photo.id, photo.title, photo.description, created, url))
             cur.execute(
                 "insert into album2photos"
                 "  (album, photo)"
                 "    VALUES"
                 "  (?, ?)",
                 (album.id, photo.id))
+        else:
+            # make sure title, description and url are up-to-date (description
+            # field wasn't in the original schema).
+            cur.execute(
+                "update photos"
+                "  set title = ?,"
+                "    description = ?,"
+                "    url = ?"
+                "  where id = ?",
+                (photo.title, photo.description, url, photo.id))
     db.commit()
 
 def load_photos(container, db, maxphotos=0):
@@ -113,7 +136,6 @@ def load_photos(container, db, maxphotos=0):
         raise AttributeError(f"{container} has no getPhotos attribute.")
 
     photos = set()
-    ids = set()
     page = 1
     page_size = 250 if maxphotos == 0 else min(250, maxphotos)
     eprint(f"Download up to {page_size} photos from {container}")
@@ -131,7 +153,6 @@ def load_photos(container, db, maxphotos=0):
         populate_photos_db(new_photos, container, db)
 
         photos |= set(new_photos)
-        ids |= set(photo.id for photo in new_photos)
 
         if len(new_photos) < page_size:
             break
@@ -146,11 +167,6 @@ def classify_photos(photos):
     errors = set()
     n = 0
     for photo in photos:
-        n += 1
-        if n % 25 == 0:
-            eprint("... photos:", len(rest),
-                   "orphans:", len(orphans),
-                   "errors:", len(errors))
         try:
             album_context = FLICKR_API.call_flickr(photo.getAllContexts)
             album_context = album_context[0]
@@ -172,6 +188,12 @@ def classify_photos(photos):
                 continue
 
         rest.add(photo)
+        n += 1
+        if n % 25 == 0:
+            eprint("... photos:", len(rest),
+                   "orphans:", len(orphans),
+                   "errors:", len(errors))
+
     eprint("photos:", len(rest),
            "orphans:", len(orphans),
            "errors:", len(errors))
@@ -179,13 +201,15 @@ def classify_photos(photos):
     return orphans, errors, rest
 
 
-def save_photos(photos, user, outputdir="."):
+def save_photos(photos, user, db, outputdir="."):
     if not photos:
         return
     eprint(f"saving {len(photos)} photos to {outputdir}")
     outputdir = Path(outputdir)
     outputdir.mkdir(parents=True, exist_ok=True)
 
+    cur = db.cursor()
+    cur.execute("BEGIN")
     for (n, photo) in enumerate(photos):
         if (n+1) % 100 == 0:
             eprint("... photos:", n+1)
@@ -197,16 +221,23 @@ def save_photos(photos, user, outputdir="."):
         except FlickrCallFailed as exc:
             if FLICKR_API.total_errors >= 10:
                 eprint(f"error saving {filename} ({exc})")
+        else:
+            cur.execute("update photos set deleted = 0"
+                        "  where id = ?", (photo.id,))
+    db.commit()
 
-def delete_photos(photos):
+
+def delete_photos(photos, db):
     if not photos:
         return
 
-    yn = input(f"Delete {len(photos)} photos (y/n)? ")
+    yn = input(f"Delete {len(photos)} photos (y/n)? ")   # nosec
     if not yn or yn.lower()[0] != "y":
         eprint("Delete not confirmed.")
         return
 
+    cur = db.cursor()
+    cur.execute("begin")
     for (n, photo) in enumerate(photos):
         if (n+1) % 100 == 0:
             eprint("... photos:", n+1)
@@ -215,6 +246,10 @@ def delete_photos(photos):
         except FlickrCallFailed as exc:
             if FLICKR_API.n_errors >= 10 or FLICKR_API.n_timeouts >= 10:
                 eprint(f"error deleting photo {photo.id} ({exc})")
+        else:
+            cur.execute("update photos set deleted = 1"
+                        "  where id = ?", (photo.id,))
+    db.commit()
 
 
 def flickr_login(username):
@@ -227,25 +262,34 @@ def flickr_login(username):
 
 
 def get_album(album_name, user, db):
-    albums = user.getPhotosets()
+    albums = FLICKR_API.call_flickr(user.getPhotosets)
 
     # Take the opportunity to populate albums table
     cur = db.cursor()
     cur.execute("begin")
     for album in albums:
+        url = (f"https://www.flickr.com/photos/{album.owner}/albums/{album.id}")
         n = cur.execute(
             "select count(*) from albums"
             "  where id = ?", (album.id,)).fetchone()[0]
         if n == 0:
-            url = (f"https://www.flickr.com/photos/"
-                f"{album.owner}/albums/{album.id}")
             cur.execute(
                 "insert into albums"
-                "  (id, title, created, url)"
+                "  (id, title, description, created, url)"
                 "    VALUES"
-                "  (?, ?, ?, ?)",
-                (album.id, album.title, album.date_create, url))
+                "  (?, ?, ?, ?, ?)",
+                (album.id, album.title, album.description, album.date_create, url))
             eprint(f"Inserted {album} in db")
+        else:
+            # make sure title, description and url are up-to-date (description
+            # field wasn't in the original schema).
+            cur.execute(
+                "update albums"
+                "  set title = ?,"
+                "    description = ?,"
+                "    url = ?"
+                "  where id = ?",
+                (album.title, album.description, url, album.id))
     db.commit()
 
     try:
@@ -260,10 +304,10 @@ def parse_args():
     parser.add_argument("-v", "--verbose", dest="verbose", action="store_true")
     parser.add_argument("-s", "--save", dest="save",
                         help="save orphaned photos to this dir")
-    parser.add_argument("--delete-all", dest="deleteall", default=False,
+    parser.add_argument("--delete-all", dest="delete_all", default=False,
                         action="store_true",
                         help="if true delete all photos, not just orphans")
-    parser.add_argument("--delete", dest="delete", action="store_true",
+    parser.add_argument("--delete-orphans", dest="delete_orphans", action="store_true",
                         help="delete orphaned photos", default=False)
     parser.add_argument("-m", "--maxphotos", dest="maxphotos", type=int,
                         help="max # of photos to download", default=0)
@@ -283,15 +327,18 @@ def get_db_connection(sqldb):
         create table photos (
           id TEXT PRIMARY KEY,
           title TEXT,
+          description TEXT DEFAULT "",
           url TEXT,
           created INTEGER,
-          taken INTEGER
+          taken INTEGER,
+          deleted INTEGER DEFAULT 0
         )""")
 
         conn.execute("""
         create table albums (
           id TEXT PRIMARY_KEY,
           title TEXT,
+          description TEXT DEFAULT "",
           created INTEGER,
           url TEXT
         )""")
@@ -332,15 +379,15 @@ def main():
 
     if args.save is not None:
         eprint("saving photos to", args.save)
-        save_photos(orphans, user, args.save)
-        save_photos(errors, user, args.save)
-        save_photos(rest, user, args.save)
+        save_photos(orphans, user, db, args.save)
+        save_photos(errors, user, db, args.save)
+        save_photos(rest, user, db, args.save)
 
-    if args.delete:
-        delete_photos(orphans)
-        if args.deleteall:
-            delete_photos(errors)
-            delete_photos(rest)
+    if args.delete_orphans:
+        delete_photos(orphans, db)
+        if args.delete_all:
+            delete_photos(errors, db)
+            delete_photos(rest, db)
 
     return 0
 
