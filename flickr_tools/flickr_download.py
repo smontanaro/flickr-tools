@@ -61,33 +61,37 @@ class FlickrAPI:
 
         self.n_calls += 1
         if self.n_calls % 50 == 0:
-            # pause to avoid clampdown by Flickr?
-            pause = random.random() * 15   # nosec
+            # pause to avoid clampdown by Flickr? ¯\_(ツ)_/¯
+            pause = random.random() * 7           # nosec
             eprint(f"pause {pause:.2f}s (calls: {self.n_calls})")
             time.sleep(pause)
 
         name = func_name(method)
         eprint(f"calling: {name}(*{args}, **{kwds})")
-        try:
-            result = method(*args, **kwds)
-            self.n_timeouts = self.n_errors = 0
-            return result
-        except flickr.FlickrError as exc:
-            errmsg = re.sub("<html[^>]*>.*</html>",
-                "<html> ... (elided) ...</html>",
-                str(exc), flags=re.DOTALL)
-            self.n_errors += 1
-            eprint(f"{name} error, pause 15s")
-            time.sleep(15)
-            raise FlickrCallFailed(errmsg) from exc
-        except requests.Timeout as exc:
-            self.n_timeouts += 1
-            raise FlickrCallFailed("timeout") from exc
-        except OSError as exc:
-            self.n_errors += 1
-            eprint(f"{name} error, pause 15s")
-            time.sleep(15)
-            raise FlickrCallFailed(str(exc)) from exc
+        while True:
+            try:
+                result = method(*args, **kwds)
+                self.n_timeouts = self.n_errors = 0
+                return result
+            except flickr.FlickrError as exc:
+                errmsg = re.sub("<html[^>]*>.*</html>",
+                    "<html> ... (elided) ...</html>",
+                    str(exc), flags=re.DOTALL)
+                self.n_errors += 1
+                eprint(f"{name} error, pause 15s")
+                if self.total_errors >= 10:
+                    raise FlickrCallFailed(errmsg) from exc
+                time.sleep(15)
+            except requests.Timeout as exc:
+                self.n_timeouts += 1
+                if self.total_errors >= 10:
+                    raise FlickrCallFailed("timeout") from exc
+            except OSError as exc:
+                self.n_errors += 1
+                eprint(f"{name} error, pause 15s")
+                if self.total_errors >= 10:
+                    raise FlickrCallFailed(str(exc)) from exc
+                time.sleep(15)
 
 FLICKR_API = FlickrAPI()
 
@@ -96,8 +100,9 @@ def populate_photos_db(photos, album, db):
     cur.execute("begin")
 
     for photo in photos:
-        url = FLICKR_API.call_flickr(photo.getPageUrl).replace("http://", "https://")
         try:
+            url = FLICKR_API.call_flickr(photo.getPageUrl)
+            url = url.replace("http://", "https://")
             info = FLICKR_API.call_flickr(photo.getInfo)
         except FlickrCallFailed:
             eprint("error retrieving info for", photo)
@@ -144,10 +149,7 @@ def load_photos(container, db, maxphotos=0):
             new_photos = FLICKR_API.call_flickr(container.getPhotos,
                 per_page=page_size, page=page)
         except FlickrCallFailed:
-            if FLICKR_API.total_errors >= 10:
-                eprint("Too many errors or timeouts")
-                break
-            continue
+            break
 
         eprint(f"found {len(new_photos)} images, page size {page_size}")
         populate_photos_db(new_photos, container, db)
@@ -171,10 +173,8 @@ def classify_photos(photos):
             album_context = FLICKR_API.call_flickr(photo.getAllContexts)
             album_context = album_context[0]
         except FlickrCallFailed as exc:
-            if FLICKR_API.total_errors >= 10:
-                eprint("error getting contexts for", photo, exc)
-                break
             errors.add(photo)
+            eprint("error getting contexts for", photo, exc)
             continue
 
         if not album_context:
@@ -219,8 +219,7 @@ def save_photos(photos, user, db, outputdir="."):
         try:
             FLICKR_API.call_flickr(photo.save, filename, size_label="Original")
         except FlickrCallFailed as exc:
-            if FLICKR_API.total_errors >= 10:
-                eprint(f"error saving {filename} ({exc})")
+            eprint(f"error saving {filename} ({exc})")
         else:
             cur.execute("update photos set deleted = 0"
                         "  where id = ?", (photo.id,))
@@ -244,8 +243,7 @@ def delete_photos(photos, db):
         try:
             FLICKR_API.call_flickr(photo.delete)
         except FlickrCallFailed as exc:
-            if FLICKR_API.n_errors >= 10 or FLICKR_API.n_timeouts >= 10:
-                eprint(f"error deleting photo {photo.id} ({exc})")
+            eprint(f"error deleting photo {photo.id} ({exc})")
         else:
             cur.execute("update photos set deleted = 1"
                         "  where id = ?", (photo.id,))
