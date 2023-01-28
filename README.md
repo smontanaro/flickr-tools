@@ -100,3 +100,41 @@ Given that these files are hard-coded into the `flickr-download` app
 without any directory info, you currently must keep them in the same
 directory and run the app from that directory.  Someday I might get
 around to changing that.
+
+## Command Line ##
+
+At minimum, you need to give the `--user` argument so you can
+login. By default, it will fetch the user's photos.  You can also
+give the `--album` argument to restrict view to a particular album.
+
+When first written, the goal was to identify and download "orphan"
+photos, those which were in no albums or in just the Auto Upload
+album.  The goal was to allow download and deletion of such orphan
+photos to reduce the user's Flickr footprint.  Accordingly, photo
+deletion is split into two parts, `--delete-orphans` and
+`--delete-all` The latter is subservient to the former (you need to
+delete orphan images if you want to delete non-orphan images).  This
+is probably not the best way to do things. It's just the current state
+of affairs.  If any photos are candidates for deletion, the program
+prompts for confirmation.
+
+Generally speaking, you will want to save (`--save`) the photos, but
+it's not required.  Similarly, you can choose to specify a SQLite3
+database file, but it's not required.
+
+For debugging purposes, you can use `--maxphotos` to only process a
+subset of available photos.  The `--verbose` flag produces plenty of
+output.  Without it, the program is basically silent.
+
+### Examples ###
+
+  * Download the Auto Upload album, save its photos, and delete those
+    which are orphans from Flickr:
+
+    `flickr_download --user you --save auto-upload --album 'Auto Upload' --delete-orphans`
+
+  * Download an album named `My Bikes`, but don't save or delete
+    anything, just save the details to a SQLite3 database named
+    `flickr.db`:
+
+    `flickr_download --user you --album 'My Bikes' --database flickr.db`
