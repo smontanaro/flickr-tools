@@ -306,7 +306,7 @@ def parse_args():
                         help="save orphaned photos to this dir")
     parser.add_argument("--delete-all", dest="delete_all", default=False,
                         action="store_true",
-                        help="if true delete all photos, not just orphans")
+                        help="if given, delete all photos, not just orphans")
     parser.add_argument("--delete-orphans", dest="delete_orphans", action="store_true",
                         help="delete orphaned photos", default=False)
     parser.add_argument("-m", "--maxphotos", dest="maxphotos", type=int,
