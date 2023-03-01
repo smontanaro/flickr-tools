@@ -266,7 +266,7 @@ def get_album(album_name, user, db):
     cur = db.cursor()
     cur.execute("begin")
     for album in albums:
-        url = (f"https://www.flickr.com/photos/{album.owner}/albums/{album.id}")
+        url = f"https://www.flickr.com/photos/{album.owner}/albums/{album.id}"
         n = cur.execute(
             "select count(*) from albums"
             "  where id = ?", (album.id,)).fetchone()[0]
