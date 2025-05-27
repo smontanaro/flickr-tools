@@ -144,7 +144,7 @@ def best_size(photo):
     for key in sizes:
         size = sizes[key]
         try:
-            pixels = size["height"] * size["width"]
+            pixels = int(size["height"]) * int(size["width"])
         except TypeError:
             eprint(f"error processing {size}")
             continue
