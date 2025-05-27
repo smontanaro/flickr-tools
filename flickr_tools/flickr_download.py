@@ -143,7 +143,11 @@ def best_size(photo):
     sizes = photo.getSizes()
     for key in sizes:
         size = sizes[key]
-        pixels = size["height"] * size["width"]
+        try:
+            pixels = size["height"] * size["width"]
+        except TypeError:
+            eprint(f"error processing {size}")
+            continue
         if pixels > best:
             best = pixels
             label = key
