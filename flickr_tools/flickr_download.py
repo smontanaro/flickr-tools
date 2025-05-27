@@ -136,6 +136,20 @@ def populate_photos_db(photos, album, db):
                 (photo.title, photo.description, url, photo.id))
     db.commit()
 
+def best_size(photo):
+    """As a free user I can no longer download "Original" all the time."""
+    best = 0
+    label = ""
+    sizes = photo.getSizes()
+    for key in sizes:
+        size = sizes[key]
+        pixels = size["height"] * size["width"]
+        if pixels > best:
+            best = pixels
+            label = key
+            eprint(best, label)
+    return label
+
 def load_photos(container, db, maxphotos=0):
     if not hasattr(container, "getPhotos"):
         raise AttributeError(f"{container} has no getPhotos attribute.")
@@ -217,7 +231,8 @@ def save_photos(photos, user, db, outputdir="."):
         if filename.exists():
             continue
         try:
-            FLICKR_API.call_flickr(photo.save, filename, size_label="Original")
+            FLICKR_API.call_flickr(photo.save, filename,
+                                   size_label=best_size(photo))
         except FlickrCallFailed as exc:
             eprint(f"error saving {filename} ({exc})")
         else:
