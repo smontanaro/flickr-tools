@@ -146,7 +146,7 @@ def best_size(photo):
         try:
             pixels = int(size["height"]) * int(size["width"])
         except TypeError:
-            eprint(f"error processing {size}")
+            # eprint(f"error processing {size}")
             continue
         if pixels > best:
             best = pixels
